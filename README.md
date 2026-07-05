@@ -1,4 +1,4 @@
-# Plan & Point (v1.2)
+# Plan & Point (v1.4)
 
 A real-time planning-poker tool for scrum estimation sessions. A host creates a
 session and gets a shareable invite link; teammates open the link, enter their
@@ -6,6 +6,17 @@ name, and vote live. Cards flip face-up together when the host reveals.
 
 Built with **Node.js + Express + Socket.io** (backend) and plain HTML/CSS/JS
 (frontend, no build step).
+
+## What's new in v1.3
+
+- **Host is a pure moderator, not a voter.** The host doesn't appear in the
+  participant/voting list at all — they run the session (start stories, reveal,
+  export) but never cast an estimate.
+- **Story setup is now a single field**: just a Story ID (e.g. `JIRA-102`).
+  There's no separate title field anymore.
+- **Session codes are a short 5-letter code**, not a long alphanumeric string —
+  e.g. `bdfkm` instead of a long random string. Easier to read
+  aloud or paste, and it's what appears in the invite link (`/r/<code>`).
 
 ## What's new in v1.2
 

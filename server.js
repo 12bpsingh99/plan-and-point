@@ -18,34 +18,39 @@ app.get('/r/:sessionId', (req, res) => {
 });
 
 const FIBONACCI = ['0', '½', '1', '2', '3', '5', '8', '13', '21', '34', '55', '89', '?', '☕'];
-const DISCONNECT_GRACE_MS = 5 * 60 * 1000; // 5 minutes, per AC-8/AC-10/AC-11
+const DISCONNECT_GRACE_MS = 5 * 60 * 1000; // 5 minutes
 
 /* ---------------------------------------------------------
    In-memory session store.
    sessions: Map<sessionId, {
-     id, name, hostClientId, createdAt,
+     id, name, hostClientId, hostName, hostSocketId, hostDisconnectTimer, createdAt,
      participants: Map<clientId, { clientId, name, socketId, status, joinedAt, disconnectTimer }>,
-     currentStory: null | { storyId, storyTitle, revealed, votes: {clientId:label}, startedAt },
-     storyHistory: [ { storyId, storyTitle, votes: {name:label}, revealedAt } ]
+     currentStory: null | { storyId, revealed, votes: {clientId:label}, startedAt },
+     storyHistory: [ { storyId, votes: {name:label}, revealedAt } ]
    }>
+   The host is NOT a participant — they moderate the session but don't vote.
    Single-instance, in-memory by design — see README for the trade-off.
 --------------------------------------------------------- */
 const sessions = new Map();
 
 function randomSessionId() {
-  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+  // 5-letter code, lowercase, no ambiguous characters (no i/l/o to avoid 1/0 confusion)
+  const chars = 'abcdefghjkmnpqrstuvwxyz';
   let s = '';
-  for (let i = 0; i < 7; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 5; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
 }
 
-function makeSession(sessionName, hostClientId) {
+function makeSession(sessionName, hostClientId, hostName, hostSocketId) {
   let id = randomSessionId();
   while (sessions.has(id)) id = randomSessionId();
   const session = {
     id,
     name: sessionName.trim(),
     hostClientId,
+    hostName: hostName.trim(),
+    hostSocketId,
+    hostDisconnectTimer: null,
     createdAt: Date.now(),
     participants: new Map(),
     currentStory: null,
@@ -63,6 +68,7 @@ function addParticipant(session, clientId, name, socketId) {
 
 function nameTaken(session, name, excludeClientId) {
   const lower = name.trim().toLowerCase();
+  if (session.hostName.toLowerCase() === lower && session.hostClientId !== excludeClientId) return true;
   for (const [cid, p] of session.participants) {
     if (cid === excludeClientId) continue;
     if (p.name.toLowerCase() === lower) return true;
@@ -76,7 +82,6 @@ function publicSession(session) {
   }));
   const currentStory = session.currentStory ? {
     storyId: session.currentStory.storyId,
-    storyTitle: session.currentStory.storyTitle,
     revealed: session.currentStory.revealed,
     votes: session.currentStory.votes,
     startedAt: session.currentStory.startedAt,
@@ -85,6 +90,8 @@ function publicSession(session) {
     id: session.id,
     name: session.name,
     hostClientId: session.hostClientId,
+    hostName: session.hostName,
+    hostConnected: !!session.hostSocketId,
     participants,
     currentStory,
     storyHistory: session.storyHistory,
@@ -105,20 +112,31 @@ function earliestConnected(session, excludeClientId) {
   return best;
 }
 
-function scheduleRemoval(session, clientId) {
+function scheduleParticipantRemoval(session, clientId) {
   const p = session.participants.get(clientId);
   if (!p) return;
   if (p.disconnectTimer) clearTimeout(p.disconnectTimer);
   p.disconnectTimer = setTimeout(() => {
     const current = session.participants.get(clientId);
-    if (!current || current.status !== 'disconnected') return; // they reconnected in the meantime
-    const wasHost = session.hostClientId === clientId;
+    if (!current || current.status !== 'disconnected') return; // reconnected meanwhile
     session.participants.delete(clientId);
-    if (wasHost) {
-      const successor = earliestConnected(session, clientId); // AC-11
-      if (successor) session.hostClientId = successor.clientId;
+    if (session.participants.size === 0 && !session.hostSocketId) { sessions.delete(session.id); return; }
+    broadcast(session);
+  }, DISCONNECT_GRACE_MS);
+}
+
+function scheduleHostRemoval(session, hostClientIdAtDisconnect) {
+  if (session.hostDisconnectTimer) clearTimeout(session.hostDisconnectTimer);
+  session.hostDisconnectTimer = setTimeout(() => {
+    if (session.hostClientId !== hostClientIdAtDisconnect) return; // already changed
+    if (session.hostSocketId) return; // reconnected in the meantime
+    const successor = earliestConnected(session, hostClientIdAtDisconnect);
+    if (successor) {
+      session.hostClientId = successor.clientId;
+      session.hostName = successor.name;
+      session.hostSocketId = successor.socketId;
     }
-    if (session.participants.size === 0) { sessions.delete(session.id); return; }
+    if (!successor && session.participants.size === 0) { sessions.delete(session.id); return; }
     broadcast(session);
   }, DISCONNECT_GRACE_MS);
 }
@@ -129,8 +147,7 @@ io.on('connection', (socket) => {
     if (!sessionName || !sessionName.trim()) return cb({ ok: false, error: 'Session name is required.' });
     if (!hostName || !hostName.trim()) return cb({ ok: false, error: 'Your name is required.' });
     const cid = clientId || crypto.randomUUID();
-    const session = makeSession(sessionName, cid);
-    addParticipant(session, cid, hostName, socket.id);
+    const session = makeSession(sessionName, cid, hostName, socket.id);
     socket.join(session.id);
     socket.data.sessionId = session.id;
     socket.data.clientId = cid;
@@ -155,39 +172,51 @@ io.on('connection', (socket) => {
   socket.on('rejoin-session', ({ sessionId, clientId }, cb) => {
     const session = sessions.get((sessionId || '').trim());
     if (!session) return cb({ ok: false, error: 'gone' });
+
+    if (session.hostClientId === clientId) {
+      if (session.hostDisconnectTimer) { clearTimeout(session.hostDisconnectTimer); session.hostDisconnectTimer = null; }
+      session.hostSocketId = socket.id;
+      socket.join(session.id);
+      socket.data.sessionId = session.id;
+      socket.data.clientId = clientId;
+      cb({ ok: true, name: session.hostName, isHost: true });
+      broadcast(session);
+      return;
+    }
+
     const p = session.participants.get(clientId);
     if (!p) return cb({ ok: false, error: 'gone' });
-    if (p.disconnectTimer) { clearTimeout(p.disconnectTimer); p.disconnectTimer = null; } // AC-9
+    if (p.disconnectTimer) { clearTimeout(p.disconnectTimer); p.disconnectTimer = null; }
     p.socketId = socket.id;
     const hasVote = session.currentStory && session.currentStory.votes.hasOwnProperty(clientId);
     p.status = hasVote ? 'voted' : 'waiting';
     socket.join(session.id);
     socket.data.sessionId = session.id;
     socket.data.clientId = clientId;
-    cb({ ok: true, name: p.name });
+    cb({ ok: true, name: p.name, isHost: false });
     broadcast(session);
   });
 
   socket.on('submit-vote', ({ value }) => {
     const { sessionId, clientId } = socket.data;
     const session = sessions.get(sessionId);
-    if (!session || !session.currentStory || session.currentStory.revealed) return; // AC-19
+    if (!session || !session.currentStory || session.currentStory.revealed) return;
+    if (session.hostClientId === clientId) return; // host doesn't vote
     if (!FIBONACCI.includes(value)) return;
     const p = session.participants.get(clientId);
     if (!p) return;
-    session.currentStory.votes[clientId] = value; // AC-17/AC-18
+    session.currentStory.votes[clientId] = value;
     p.status = 'voted';
     broadcast(session);
   });
 
-  socket.on('start-story', ({ storyId, storyTitle }) => {
+  socket.on('start-story', ({ storyId }) => {
     const { sessionId, clientId } = socket.data;
     const session = sessions.get(sessionId);
-    if (!session || session.hostClientId !== clientId) return; // AC-25
+    if (!session || session.hostClientId !== clientId) return;
     if (session.currentStory && !session.currentStory.revealed) return;
     session.currentStory = {
       storyId: (storyId || '').trim() || `S${session.storyHistory.length + 1}`,
-      storyTitle: (storyTitle || '').trim() || 'Untitled story',
       revealed: false,
       votes: {},
       startedAt: Date.now(),
@@ -199,12 +228,12 @@ io.on('connection', (socket) => {
   socket.on('reveal-votes', () => {
     const { sessionId, clientId } = socket.data;
     const session = sessions.get(sessionId);
-    if (!session || session.hostClientId !== clientId || !session.currentStory) return; // AC-20
+    if (!session || session.hostClientId !== clientId || !session.currentStory) return;
     session.currentStory.revealed = true;
     broadcast(session);
   });
 
-  socket.on('next-story', ({ storyId, storyTitle }) => {
+  socket.on('next-story', ({ storyId }) => {
     const { sessionId, clientId } = socket.data;
     const session = sessions.get(sessionId);
     if (!session || session.hostClientId !== clientId) return;
@@ -215,10 +244,9 @@ io.on('connection', (socket) => {
       const p = session.participants.get(cid);
       votesByName[p ? p.name : cid] = label;
     }
-    session.storyHistory.push({ storyId: cs.storyId, storyTitle: cs.storyTitle, votes: votesByName, revealedAt: Date.now() }); // AC-13
+    session.storyHistory.push({ storyId: cs.storyId, votes: votesByName, revealedAt: Date.now() });
     session.currentStory = {
       storyId: (storyId || '').trim() || `S${session.storyHistory.length + 1}`,
-      storyTitle: (storyTitle || '').trim() || 'Untitled story',
       revealed: false,
       votes: {},
       startedAt: Date.now(),
@@ -240,19 +268,25 @@ io.on('connection', (socket) => {
     if (!sessionId || !clientId) return;
     const session = sessions.get(sessionId);
     if (!session) return;
+
+    const wasHost = session.hostClientId === clientId;
     const p = session.participants.get(clientId);
-    if (!p) return;
-    p.status = 'disconnected'; // AC-8
-    p.socketId = null;
-    scheduleRemoval(session, clientId);
-    broadcast(session);
+
+    if (p) {
+      p.status = 'disconnected';
+      p.socketId = null;
+      scheduleParticipantRemoval(session, clientId);
+    }
+    if (wasHost) {
+      session.hostSocketId = null;
+      scheduleHostRemoval(session, clientId);
+    }
+    if (p || wasHost) broadcast(session);
   });
 });
 
 /* ---------------------------------------------------------
-   Exports (AC-27 / AC-28). Host-only, checked via clientId query param.
-   Note: this is a lightweight check suitable for a small team tool,
-   not a full auth system.
+   Exports. Host-only, checked via clientId query param.
 --------------------------------------------------------- */
 
 function requireHost(req, res) {
@@ -271,8 +305,7 @@ function allStoriesFor(session) {
       votesByName[p ? p.name : cid] = label;
     }
     list.push({
-      storyId: session.currentStory.storyId,
-      storyTitle: session.currentStory.storyTitle + (session.currentStory.revealed ? '' : ' (in progress)'),
+      storyId: session.currentStory.storyId + (session.currentStory.revealed ? '' : ' (in progress)'),
       votes: votesByName,
     });
   }
@@ -291,6 +324,7 @@ app.get('/api/session/:sessionId/export/pdf', (req, res) => {
 
   doc.fontSize(20).text(session.name, { underline: true });
   doc.fontSize(10).fillColor('#555').text(new Date().toLocaleString());
+  doc.fontSize(10).fillColor('#555').text(`Host: ${session.hostName}`);
   doc.moveDown();
 
   doc.fontSize(13).fillColor('#000').text('Participants');
@@ -298,7 +332,7 @@ app.get('/api/session/:sessionId/export/pdf', (req, res) => {
 
   allStoriesFor(session).forEach(story => {
     doc.moveDown();
-    doc.fontSize(13).fillColor('#000').text(`${story.storyId} — ${story.storyTitle}`);
+    doc.fontSize(13).fillColor('#000').text(`Story ${story.storyId}`);
     const votedNames = Object.keys(story.votes);
     Object.entries(story.votes).forEach(([name, label]) => doc.fontSize(10).fillColor('#333').text(`   ${name}: ${label}`));
     const nonVoters = [...session.participants.values()].map(p => p.name).filter(n => !votedNames.includes(n));
@@ -315,18 +349,19 @@ app.get('/api/session/:sessionId/export/excel', async (req, res) => {
   const wb = new ExcelJS.Workbook();
   const infoSheet = wb.addWorksheet('Session');
   infoSheet.addRow(['Session Name', session.name]);
+  infoSheet.addRow(['Host', session.hostName]);
   infoSheet.addRow(['Date', new Date().toLocaleString()]);
   infoSheet.addRow([]);
   infoSheet.addRow(['Participants']);
   [...session.participants.values()].forEach(p => infoSheet.addRow([p.name]));
 
   const storySheet = wb.addWorksheet('Stories & Votes');
-  storySheet.addRow(['Story ID', 'Story Title', 'Participant', 'Vote']);
+  storySheet.addRow(['Story ID', 'Participant', 'Vote']);
   allStoriesFor(session).forEach(story => {
     const votedNames = Object.keys(story.votes);
-    Object.entries(story.votes).forEach(([name, label]) => storySheet.addRow([story.storyId, story.storyTitle, name, label]));
+    Object.entries(story.votes).forEach(([name, label]) => storySheet.addRow([story.storyId, name, label]));
     const nonVoters = [...session.participants.values()].map(p => p.name).filter(n => !votedNames.includes(n));
-    nonVoters.forEach(name => storySheet.addRow([story.storyId, story.storyTitle, name, "Didn't vote"]));
+    nonVoters.forEach(name => storySheet.addRow([story.storyId, name, "Didn't vote"]));
   });
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
