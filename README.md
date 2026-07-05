@@ -1,12 +1,33 @@
-# Plan & Point
+# Plan & Point (v1.2)
 
-A real-time planning-poker tool for scrum estimation sessions. One host creates a
-room, sets the poll name and voting scale (Fibonacci, T-shirt sizes, confidence %,
-or a custom list), and the team votes live. Cards flip face-up together when the
-host reveals — no anchoring bias.
+A real-time planning-poker tool for scrum estimation sessions. A host creates a
+session and gets a shareable invite link; teammates open the link, enter their
+name, and vote live. Cards flip face-up together when the host reveals.
 
 Built with **Node.js + Express + Socket.io** (backend) and plain HTML/CSS/JS
-(frontend, no build step needed).
+(frontend, no build step).
+
+## What's new in v1.2
+
+- **Invite links** instead of manually shared room codes — visiting `/r/<sessionId>`
+  only asks for your name (create/join code flow is still available from the
+  landing page as a fallback).
+- **Live participant states**: Waiting / Voted / Disconnected, updating without a refresh.
+- **Reconnect grace period**: if someone's connection drops (or they refresh the
+  page), they have 5 minutes to reconnect and keep their identity, name, and vote.
+  After 5 minutes they're removed from the session.
+- **Automatic host transfer**: if the host disconnects for more than 5 minutes,
+  host controls pass to the earliest-joined remaining participant.
+- **Story history**: the host starts a story, reveals it, then starts the next
+  one without ending the session. Past stories appear in a timeline; click one
+  to see its results again.
+- **Results grouped by vote value** (e.g. "8 points — Bhanu, Rahul, Neha"),
+  sorted by how many people picked each value, plus a separate "Didn't vote"
+  list. Average/mode/highest/lowest stats have been removed.
+- **Fibonacci scale** now includes ½, 55, and 89 alongside 0–34, ?, and ☕.
+- **PDF and Excel export** (host-only) — a full record of the session:
+  participants, every story, every vote, and non-voters.
+- Refreshing the page no longer removes you from the session.
 
 ## Run it locally
 
@@ -18,56 +39,63 @@ npm install
 npm start
 ```
 
-Open **http://localhost:3000** in a few browser tabs to try host + voter flows.
+Open **http://localhost:3000** in a few browser tabs to try host + participant flows.
 
 ## How it works
 
-- The server keeps rooms in memory (`Map`) — no database needed for a small team tool.
-- Each browser tab is a Socket.io connection; the server pushes a `room-update`
-  event to everyone in a room the instant something changes (vote cast, reveal,
-  new round, kick). This is genuinely real-time — no polling.
-- A room is identified by a 5-character code (e.g. `K7QXM`).
-- If the host disconnects, the room closes automatically for everyone in it.
-  If a voter disconnects, they're just removed from that room's roster.
-- **Limitation to know about:** state lives in the server's memory only. If you
-  deploy to a host that runs multiple instances/workers of your app (auto-scaling,
-  multiple dynos), rooms won't be visible across instances, since each instance
-  has its own memory. Deploy as a **single instance** unless you add a shared
-  store like Redis — for a scrum team's use case, one instance is normal and fine.
+- Sessions live in the server's memory (`Map`) — no database.
+- Each browser gets a random `clientId` saved in `localStorage`, separate from
+  the Socket.io connection ID. This is what makes refresh-without-losing-your-seat
+  and reconnect-within-5-minutes possible — your identity survives even if your
+  socket connection doesn't.
+- The server pushes a `session-update` event to everyone in a session the
+  instant something changes (vote cast, reveal, new story, join/leave). This is
+  genuinely real-time — no polling.
+- **Still a single-instance app.** If you deploy with multiple instances/workers,
+  sessions won't be visible across instances, since each instance has its own
+  memory. Keep it at 1 instance unless you add a shared store like Redis.
 
 ## Deploying it online
 
 You need a host that keeps a persistent Node.js process running and supports
-WebSockets (this rules out plain serverless platforms like Vercel/Netlify
-functions, which don't hold long-lived connections). Good, simple options:
+WebSockets. See the two write-ups below for step-by-step instructions:
 
-### Option A — Render.com (recommended, has a free tier)
-1. Push this folder to a GitHub repo.
-2. On [render.com](https://render.com), click **New → Web Service**, connect the repo.
-3. Build command: `npm install`   Start command: `npm start`
-4. Instance count: **1** (see limitation above).
-5. Deploy — Render gives you a public `https://your-app.onrender.com` URL.
+- **Render.com** — easiest dashboard-based setup, has a $7/month always-on tier.
+- **Fly.io** — free tier that doesn't sleep, but is CLI-based.
 
-### Option B — Railway.app
-1. Push to GitHub, then on [railway.app](https://railway.app) choose
-   **New Project → Deploy from GitHub repo**.
-2. Railway auto-detects Node and runs `npm install && npm start`.
-3. Add a public domain from the service's **Settings → Networking** tab.
+(Both were covered in detail in earlier conversation — ask again if you need
+the full walkthrough repeated.)
 
-### Option C — Fly.io
-1. Install the `flyctl` CLI, run `fly launch` in this folder (accept the Node
-   defaults), then `fly deploy`.
-2. Fly is a good fit if you want the app to live close to your team's region.
+## Updating your live site after making changes
 
-Whichever you choose, once deployed, share the URL with your team — anyone who
-opens it can host or join a room from the same page.
+Once you've already deployed, getting new changes live depends on where you deployed:
+
+**If you're on Render:**
+1. Re-upload the changed files to your GitHub repo (or use `git push` if you're
+   using Git locally) — overwrite the old versions of `server.js`, `package.json`,
+   and everything in `public/`.
+2. Render automatically detects the change on your `main` branch and redeploys
+   within a minute or two. Watch the **Logs** tab on your Render dashboard to
+   confirm it finishes with "Plan & Point listening on port...".
+
+**If you're on Fly.io:**
+1. Save the changed files into your local project folder (same names/paths).
+2. From that folder, run:
+   ```bash
+   flyctl deploy
+   ```
+3. Fly rebuilds and redeploys — no GitHub push required.
+
+Either way, **existing live sessions will be dropped** the moment the server
+restarts (remember, everything lives in memory) — so redeploy between sessions,
+not mid-standup.
 
 ## Project structure
 
 ```
 plan-and-point/
 ├── package.json
-├── server.js          # Express + Socket.io backend, room logic
+├── server.js          # Express + Socket.io backend, session & story logic, exports
 ├── public/
 │   ├── index.html
 │   ├── styles.css
@@ -75,9 +103,13 @@ plan-and-point/
 └── README.md
 ```
 
-## Possible next steps
+## Known limitations / possible next steps
 
-- Swap the in-memory room store for Redis if you need multiple server instances.
-- Add a "spectator" role that can watch without voting.
-- Persist round history per room for retro notes.
-- Add simple auth so only your team can create rooms.
+- In-memory only — swap for Redis if you need multiple server instances or
+  session persistence across restarts.
+- Export authorization checks `clientId` in the URL, which is adequate for a
+  small trusted team but not a substitute for real auth if you open this to
+  the public internet.
+- No "spectator" role yet — everyone who joins can vote.
+- No automated load testing was run; it's built to comfortably handle a normal
+  scrum team's size (a handful to a few dozen people).
