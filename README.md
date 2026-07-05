@@ -1,4 +1,4 @@
-# Plan & Point (v1.4)
+# Plan & Point (v1.6)
 
 A real-time planning-poker tool for scrum estimation sessions. A host creates a
 session and gets a shareable invite link; teammates open the link, enter their
@@ -6,6 +6,21 @@ name, and vote live. Cards flip face-up together when the host reveals.
 
 Built with **Node.js + Express + Socket.io** (backend) and plain HTML/CSS/JS
 (frontend, no build step).
+
+## What's new in v1.6
+
+- **No more 5-minute reconnect limit.** If someone's connection drops or they
+  refresh the page, they can rejoin at any point while the session is still
+  open — no time limit, no automatic removal, no automatic host transfer.
+  Disconnected participants just sit in the player list marked "disconnected"
+  until they come back or the host ends the session.
+
+## What's new in v1.5
+
+- Restyled the voting cards, player sidebar, and results view to match a
+  PlanITPoker-style layout (banknote-style cards, avatars, live status,
+  waiting banner, donut-chart results) while keeping our existing color theme.
+- Added host controls: **Reset timer**, **Clear votes**, **Skip story**.
 
 ## What's new in v1.3
 
@@ -24,11 +39,10 @@ Built with **Node.js + Express + Socket.io** (backend) and plain HTML/CSS/JS
   only asks for your name (create/join code flow is still available from the
   landing page as a fallback).
 - **Live participant states**: Waiting / Voted / Disconnected, updating without a refresh.
-- **Reconnect grace period**: if someone's connection drops (or they refresh the
-  page), they have 5 minutes to reconnect and keep their identity, name, and vote.
-  After 5 minutes they're removed from the session.
-- **Automatic host transfer**: if the host disconnects for more than 5 minutes,
-  host controls pass to the earliest-joined remaining participant.
+- **Reconnect support**: if someone's connection drops (or they refresh the
+  page), they keep their identity, name, and vote when they come back.
+  *(Note: as of v1.6 this has no time limit — see above. Originally shipped
+  with a 5-minute grace period and automatic host transfer, both since removed.)*
 - **Story history**: the host starts a story, reveals it, then starts the next
   one without ending the session. Past stories appear in a timeline; click one
   to see its results again.
@@ -57,7 +71,7 @@ Open **http://localhost:3000** in a few browser tabs to try host + participant f
 - Sessions live in the server's memory (`Map`) — no database.
 - Each browser gets a random `clientId` saved in `localStorage`, separate from
   the Socket.io connection ID. This is what makes refresh-without-losing-your-seat
-  and reconnect-within-5-minutes possible — your identity survives even if your
+  and reconnect-anytime possible — your identity survives even if your
   socket connection doesn't.
 - The server pushes a `session-update` event to everyone in a session the
   instant something changes (vote cast, reveal, new story, join/leave). This is

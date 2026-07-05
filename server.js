@@ -18,13 +18,12 @@ app.get('/r/:sessionId', (req, res) => {
 });
 
 const FIBONACCI = ['0', '1/2', '1', '2', '3', '5', '8', '13', '20', '40', '100', '?', '☕'];
-const DISCONNECT_GRACE_MS = 5 * 60 * 1000; // 5 minutes
 
 /* ---------------------------------------------------------
    In-memory session store.
    sessions: Map<sessionId, {
-     id, name, hostClientId, hostName, hostSocketId, hostDisconnectTimer, createdAt,
-     participants: Map<clientId, { clientId, name, socketId, status, joinedAt, disconnectTimer }>,
+     id, name, hostClientId, hostName, hostSocketId, createdAt,
+     participants: Map<clientId, { clientId, name, socketId, status, joinedAt }>,
      currentStory: null | { storyId, revealed, votes: {clientId:label}, startedAt },
      storyHistory: [ { storyId, votes: {name:label}, revealedAt } ]
    }>
@@ -50,7 +49,6 @@ function makeSession(sessionName, hostClientId, hostName, hostSocketId) {
     hostClientId,
     hostName: hostName.trim(),
     hostSocketId,
-    hostDisconnectTimer: null,
     createdAt: Date.now(),
     participants: new Map(),
     currentStory: null,
@@ -61,7 +59,7 @@ function makeSession(sessionName, hostClientId, hostName, hostSocketId) {
 }
 
 function addParticipant(session, clientId, name, socketId) {
-  const p = { clientId, name: name.trim(), socketId, status: 'waiting', joinedAt: Date.now(), disconnectTimer: null };
+  const p = { clientId, name: name.trim(), socketId, status: 'waiting', joinedAt: Date.now() };
   session.participants.set(clientId, p);
   return p;
 }
@@ -102,45 +100,6 @@ function broadcast(session) {
   io.to(session.id).emit('session-update', publicSession(session));
 }
 
-function earliestConnected(session, excludeClientId) {
-  let best = null;
-  for (const [cid, p] of session.participants) {
-    if (cid === excludeClientId) continue;
-    if (p.status === 'disconnected') continue;
-    if (!best || p.joinedAt < best.joinedAt) best = p;
-  }
-  return best;
-}
-
-function scheduleParticipantRemoval(session, clientId) {
-  const p = session.participants.get(clientId);
-  if (!p) return;
-  if (p.disconnectTimer) clearTimeout(p.disconnectTimer);
-  p.disconnectTimer = setTimeout(() => {
-    const current = session.participants.get(clientId);
-    if (!current || current.status !== 'disconnected') return; // reconnected meanwhile
-    session.participants.delete(clientId);
-    if (session.participants.size === 0 && !session.hostSocketId) { sessions.delete(session.id); return; }
-    broadcast(session);
-  }, DISCONNECT_GRACE_MS);
-}
-
-function scheduleHostRemoval(session, hostClientIdAtDisconnect) {
-  if (session.hostDisconnectTimer) clearTimeout(session.hostDisconnectTimer);
-  session.hostDisconnectTimer = setTimeout(() => {
-    if (session.hostClientId !== hostClientIdAtDisconnect) return; // already changed
-    if (session.hostSocketId) return; // reconnected in the meantime
-    const successor = earliestConnected(session, hostClientIdAtDisconnect);
-    if (successor) {
-      session.hostClientId = successor.clientId;
-      session.hostName = successor.name;
-      session.hostSocketId = successor.socketId;
-    }
-    if (!successor && session.participants.size === 0) { sessions.delete(session.id); return; }
-    broadcast(session);
-  }, DISCONNECT_GRACE_MS);
-}
-
 io.on('connection', (socket) => {
 
   socket.on('create-session', ({ sessionName, hostName, clientId }, cb) => {
@@ -174,7 +133,6 @@ io.on('connection', (socket) => {
     if (!session) return cb({ ok: false, error: 'gone' });
 
     if (session.hostClientId === clientId) {
-      if (session.hostDisconnectTimer) { clearTimeout(session.hostDisconnectTimer); session.hostDisconnectTimer = null; }
       session.hostSocketId = socket.id;
       socket.join(session.id);
       socket.data.sessionId = session.id;
@@ -186,7 +144,6 @@ io.on('connection', (socket) => {
 
     const p = session.participants.get(clientId);
     if (!p) return cb({ ok: false, error: 'gone' });
-    if (p.disconnectTimer) { clearTimeout(p.disconnectTimer); p.disconnectTimer = null; }
     p.socketId = socket.id;
     const hasVote = session.currentStory && session.currentStory.votes.hasOwnProperty(clientId);
     p.status = hasVote ? 'voted' : 'waiting';
@@ -330,11 +287,11 @@ io.on('connection', (socket) => {
     if (p) {
       p.status = 'disconnected';
       p.socketId = null;
-      scheduleParticipantRemoval(session, clientId);
+      // No removal timer — they can rejoin any time the session is still open.
     }
     if (wasHost) {
       session.hostSocketId = null;
-      scheduleHostRemoval(session, clientId);
+      // Host keeps their role indefinitely; no auto-transfer on disconnect.
     }
     if (p || wasHost) broadcast(session);
   });
