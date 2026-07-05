@@ -1,47 +1,53 @@
 /* ============================= STATE ============================= */
-const S = {
-  view: 'landing',        // landing | hostSetup | hostDashboard | voterJoin | voterVote
-  myId: null,             // set once socket connects
-  myName: '',
-  roomCode: '',
-  isHost: false,
-  room: null,             // last known room state from server
-  loading: false,
-  error: '',
-  newRoundDraftOpen: false,
-  _pollType: 'fibonacci',
-  _customOpts: [],
-};
+const FIBONACCI = ['0','½','1','2','3','5','8','13','21','34','55','89','?','☕'];
 
-const PRESETS = {
-  fibonacci: { name: 'Fibonacci points', options: ['0','1','2','3','5','8','13','21','34','?','☕'] },
-  tshirt:    { name: 'T-shirt sizes',   options: ['XS','S','M','L','XL','XXL','?'] },
-  percent:   { name: 'Confidence %',    options: ['0%','25%','50%','75%','90%','100%'] },
-  custom:    { name: 'Custom',          options: [] },
+function getOrCreateClientId(){
+  let id = localStorage.getItem('pp_client_id');
+  if(!id){ id = crypto.randomUUID(); localStorage.setItem('pp_client_id', id); }
+  return id;
+}
+function parseSessionIdFromPath(){
+  const m = window.location.pathname.match(/^\/r\/([a-z0-9]+)/i);
+  return m ? m[1] : null;
+}
+function parseSessionIdFromInput(input){
+  const t = (input||'').trim();
+  const m = t.match(/\/r\/([a-z0-9]+)/i);
+  if(m) return m[1];
+  return t.replace(/[^a-z0-9]/gi,'');
+}
+
+const S = {
+  clientId: getOrCreateClientId(),
+  sessionId: parseSessionIdFromPath(),
+  myName: '',
+  view: 'landing',        // landing | createSession | joinSession | room
+  session: null,
+  error: '',
+  info: '',
+  loading: false,
+  storyFormOpen: false,
+  viewingHistoryIndex: null,
 };
 
 const socket = io();
 
-socket.on('connect', () => { S.myId = socket.id; });
+socket.on('connect', () => {
+  if(S.sessionId){ attemptRejoin(); }
+});
 
-socket.on('room-update', (room) => {
-  S.room = room;
+socket.on('session-update', (session) => {
+  S.session = session;
+  if(S.view !== 'room') S.view = 'room';
   render();
 });
 
-socket.on('room-closed', () => {
-  S.error = 'This room was closed by the host.';
+socket.on('session-closed', () => {
+  S.error = 'This session was ended by the host.';
+  S.session = null;
+  S.sessionId = null;
   S.view = 'landing';
-  S.room = null;
-  S.roomCode = '';
-  render();
-});
-
-socket.on('kicked', () => {
-  S.error = 'You were removed from the room.';
-  S.view = 'landing';
-  S.room = null;
-  S.roomCode = '';
+  history.replaceState(null, '', '/');
   render();
 });
 
@@ -50,80 +56,79 @@ socket.on('kicked', () => {
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+function inviteLink(){ return `${window.location.origin}/r/${S.sessionId}`; }
+function isHost(){ return !!(S.session && S.session.hostClientId === S.clientId); }
 
-function isNumericLabel(label){
-  const t = label.trim();
-  if(t.endsWith('%')) return /^\d+(\.\d+)?%$/.test(t);
-  return /^\d+(\.\d+)?$/.test(t);
-}
-function numericValue(label){ return parseFloat(label.replace('%','')); }
-
-function computeStats(room){
-  const votes = room.votes || {};
-  const labels = Object.values(votes);
-  const counts = {};
-  room.options.forEach(o => counts[o] = 0);
-  labels.forEach(l => { counts[l] = (counts[l]||0) + 1; });
-
-  const numericLabels = labels.filter(isNumericLabel);
-  let avg = null;
-  if(numericLabels.length){
-    avg = numericLabels.reduce((a,l)=>a+numericValue(l),0) / numericLabels.length;
-  }
-  let mode = null, modeCount = 0;
-  Object.entries(counts).forEach(([label,count])=>{
-    if(count > modeCount){ mode = label; modeCount = count; }
+function namedVotesFromCurrent(session){
+  const out = {};
+  if(!session.currentStory) return out;
+  Object.entries(session.currentStory.votes).forEach(([cid, label]) => {
+    const p = session.participants.find(pp => pp.clientId === cid);
+    out[p ? p.name : cid] = label;
   });
-  const maxCount = Math.max(1, ...Object.values(counts));
-  return { counts, avg, mode, modeCount, maxCount, totalVotes: labels.length };
+  return out;
+}
+function groupByValue(namedVotes){
+  const groups = {};
+  Object.entries(namedVotes).forEach(([name,label]) => {
+    if(!groups[label]) groups[label] = [];
+    groups[label].push(name);
+  });
+  return Object.entries(groups).map(([value,names]) => ({value,names})).sort((a,b)=>b.names.length-a.names.length);
+}
+function nonVoters(namedVotes, participants){
+  const voted = new Set(Object.keys(namedVotes));
+  return participants.map(p=>p.name).filter(n => !voted.has(n));
 }
 
 /* ============================= ACTIONS ============================= */
 
-function createRoom(pollName, pollType, options){
+function attemptRejoin(){
+  socket.emit('rejoin-session', { sessionId: S.sessionId, clientId: S.clientId }, (res) => {
+    if(res.ok){ S.myName = res.name; S.view = 'room'; render(); }
+    else { S.view = 'joinSession'; render(); }
+  });
+}
+
+function createSession(sessionName, hostName){
   S.loading = true; S.error=''; render();
-  socket.emit('create-room', { hostName: S.myName, pollName, pollType, options }, (res) => {
+  socket.emit('create-session', { sessionName, hostName, clientId: S.clientId }, (res) => {
     S.loading = false;
-    if(!res.ok){ S.error = res.error || 'Could not create the room.'; render(); return; }
-    S.roomCode = res.code;
-    S.isHost = true;
-    S.view = 'hostDashboard';
+    if(!res.ok){ S.error = res.error; render(); return; }
+    S.sessionId = res.sessionId;
+    S.myName = hostName;
+    history.pushState(null, '', `/r/${res.sessionId}`);
+    S.view = 'room';
     render();
   });
 }
 
-function tryJoinRoom(code, name){
+function joinSession(name){
   S.loading = true; S.error=''; render();
-  socket.emit('join-room', { roomCode: code, name }, (res) => {
+  socket.emit('join-session', { sessionId: S.sessionId, name, clientId: S.clientId }, (res) => {
     S.loading = false;
-    if(!res.ok){ S.error = res.error || 'Could not join that room.'; render(); return; }
-    S.roomCode = code.trim().toUpperCase();
-    S.myName = name.trim() || 'Voter';
-    S.isHost = false;
-    S.view = 'voterVote';
+    if(!res.ok){ S.error = res.error; render(); return; }
+    S.myName = name;
+    S.view = 'room';
     render();
   });
 }
 
-function submitVote(label){ socket.emit('submit-vote', { value: label }); }
-function revealVotes(){ socket.emit('reveal'); }
-function startNewRound(newPollName){
-  S.newRoundDraftOpen = false;
-  socket.emit('new-round', { pollName: newPollName });
-}
-function kickVoter(voterId){ socket.emit('kick', { voterId }); }
-function endSession(){
-  socket.emit('end-session');
-  resetToLanding();
-}
-function leaveRoom(){
-  socket.disconnect();
-  socket.connect();
-  resetToLanding();
-}
-function resetToLanding(){
-  S.view = 'landing'; S.room = null; S.roomCode = ''; S.isHost = false; S.error = '';
+function submitVote(value){ socket.emit('submit-vote', { value }); }
+function revealVotes(){ socket.emit('reveal-votes'); }
+function startStory(storyId, storyTitle){ S.storyFormOpen = false; socket.emit('start-story', { storyId, storyTitle }); }
+function nextStory(storyId, storyTitle){ S.storyFormOpen = false; socket.emit('next-story', { storyId, storyTitle }); }
+function endSession(){ socket.emit('end-session'); }
+
+function leaveSession(){
+  S.session = null; S.sessionId = null; S.view = 'landing'; S.error='';
+  history.replaceState(null, '', '/');
   render();
+}
+
+function exportFile(kind){
+  const url = `/api/session/${S.sessionId}/export/${kind}?clientId=${encodeURIComponent(S.clientId)}`;
+  window.open(url, '_blank');
 }
 
 /* ============================= VIEWS ============================= */
@@ -136,230 +141,225 @@ function viewLanding(){
     </div>
     <div class="card-panel">
       <div class="hero-title">Deal the round.<br>Reveal together.</div>
-      <p class="hero-desc">Set the story, pick your point scale, and watch the table fill up as your team lays down their cards — all at once, no anchoring.</p>
+      <p class="hero-desc">Create a session, share the invite link, and watch the table fill up as your team lays down their cards — all at once, no anchoring.</p>
       <div class="choice-row">
-        <button class="choice-card" data-action="go-host">
+        <button class="choice-card" data-action="go-create">
           <span class="suit">♦</span>
-          <span class="title">Host a room</span>
-          <span class="desc">Name the poll, choose the scale, run the round.</span>
+          <span class="title">Create a session</span>
+          <span class="desc">Name it, get an invite link, run the rounds.</span>
         </button>
-        <button class="choice-card" data-action="go-join">
+        <button class="choice-card" data-action="go-join-manual">
           <span class="suit">♠</span>
-          <span class="title">Join a room</span>
-          <span class="desc">Got a room code from your host? Take a seat.</span>
+          <span class="title">Join a session</span>
+          <span class="desc">Paste the invite link or code your host sent.</span>
         </button>
       </div>
       ${S.error ? `<div class="error-text">${escapeHtml(S.error)}</div>` : ''}
     </div>
-    <footer class="tiny-note">Rooms live on the server while at least one person's connected — closing the host's tab ends the session for everyone.</footer>
+    <footer class="tiny-note">Sessions live on the server while at least one person's connected. Disconnected participants have a 5-minute grace period before they're removed.</footer>
   `;
 }
 
-function viewHostSetup(){
-  const typeCards = Object.entries(PRESETS).map(([key, p]) => `
-    <button class="type-opt ${S._pollType===key?'selected':''}" data-action="pick-type" data-type="${key}">
-      <span class="t-name">${p.name}</span>
-      <span class="t-vals">${key==='custom' ? 'define your own' : p.options.join('  ')}</span>
-    </button>
-  `).join('');
-  const showCustomField = S._pollType === 'custom';
-
+function viewCreateSession(){
   return `
     <div class="brand">
       <div class="brand-name">Plan &amp; <em>Point</em></div>
-      <div class="brand-sub">Set up your room</div>
+      <div class="brand-sub">Create a session</div>
     </div>
     <div class="card-panel">
-      <label class="field-label" for="hostName">Your name (shown to voters)</label>
-      <input class="field-full" id="hostName" placeholder="e.g. Priya" value="${escapeHtml(S.myName)}" />
+      <label class="field-label" for="sessionName">Session name</label>
+      <input class="field-full" id="sessionName" placeholder="e.g. Sprint 42 Planning" />
 
-      <label class="field-label" for="pollName">What are you sizing up?</label>
-      <input class="field-full" id="pollName" placeholder="e.g. Story: OAuth login flow" />
-
-      <label class="field-label">Voting scale</label>
-      <div class="type-grid">${typeCards}</div>
-
-      ${showCustomField ? `
-        <label class="field-label" for="customOpts">Custom options, comma-separated</label>
-        <input class="field-full" id="customOpts" placeholder="e.g. Small, Medium, Large, Not sure" value="${escapeHtml((S._customOpts||[]).join(', '))}" />
-      ` : ''}
+      <label class="field-label" for="hostName">Your name</label>
+      <input class="field-full" id="hostName" placeholder="e.g. Priya" />
 
       ${S.error ? `<div class="error-text">${escapeHtml(S.error)}</div>` : ''}
 
       <div class="btn-row">
-        <button class="btn-primary" data-action="submit-create" ${S.loading?'disabled':''}>${S.loading ? 'Creating room…' : 'Create room'}</button>
+        <button class="btn-primary" data-action="submit-create" ${S.loading?'disabled':''}>${S.loading ? 'Creating…' : 'Create session'}</button>
         <button class="btn-secondary" data-action="go-landing">Back</button>
       </div>
     </div>
   `;
 }
 
-function viewVoterJoin(){
+function viewJoinManual(){
   return `
     <div class="brand">
       <div class="brand-name">Plan &amp; <em>Point</em></div>
-      <div class="brand-sub">Join a room</div>
+      <div class="brand-sub">Join a session</div>
     </div>
     <div class="card-panel">
-      <label class="field-label" for="joinCode">Room code</label>
-      <input class="field-full" id="joinCode" placeholder="e.g. K7QXM" style="text-transform:uppercase; letter-spacing:0.1em; font-family:var(--font-mono);" maxlength="8" />
+      <label class="field-label" for="linkOrCode">Invite link or code</label>
+      <input class="field-full" id="linkOrCode" placeholder="https://.../r/ab12cd3  or  ab12cd3" />
+      ${S.error ? `<div class="error-text">${escapeHtml(S.error)}</div>` : ''}
+      <div class="btn-row">
+        <button class="btn-primary" data-action="submit-goto-join">Continue</button>
+        <button class="btn-secondary" data-action="go-landing">Back</button>
+      </div>
+    </div>
+  `;
+}
 
+function viewJoinSession(){
+  return `
+    <div class="brand">
+      <div class="brand-name">Plan &amp; <em>Point</em></div>
+      <div class="brand-sub">Join session</div>
+    </div>
+    <div class="card-panel">
       <label class="field-label" for="joinName">Your name</label>
       <input class="field-full" id="joinName" placeholder="e.g. Sam" />
-
       ${S.error ? `<div class="error-text">${escapeHtml(S.error)}</div>` : ''}
-
       <div class="btn-row">
-        <button class="btn-primary" data-action="submit-join" ${S.loading?'disabled':''}>${S.loading ? 'Joining…' : 'Join room'}</button>
+        <button class="btn-primary" data-action="submit-join" ${S.loading?'disabled':''}>${S.loading ? 'Joining…' : 'Join session'}</button>
         <button class="btn-secondary" data-action="go-landing">Back</button>
       </div>
     </div>
   `;
 }
 
-function viewHostDashboard(){
-  const room = S.room;
-  if(!room) return `<div class="loading-note">Loading room…</div>`;
-  const voterEntries = Object.entries(room.voters || {});
-  const stats = computeStats(room);
+function statusLabel(status){
+  if(status==='voted') return 'Voted';
+  if(status==='disconnected') return 'Disconnected';
+  return 'Waiting';
+}
 
-  const seats = voterEntries.length ? voterEntries.map(([vid, v]) => {
-    const voted = room.votes.hasOwnProperty(vid);
-    const label = room.votes[vid];
-    return `
-      <div class="seat">
-        <div class="flip-card ${room.revealed ? 'revealed' : ''}">
-          <div class="flip-inner">
-            <div class="flip-face flip-back"><div class="diamond"></div></div>
-            <div class="flip-face flip-front ${!voted ? 'novote' : ''}">${voted ? escapeHtml(label) : '—'}</div>
-          </div>
-        </div>
-        <div class="seat-name">${escapeHtml(v.name)}<button class="kick-x" title="Remove ${escapeHtml(v.name)}" data-action="kick" data-vid="${vid}">✕</button></div>
-        <div class="seat-status ${voted?'':'pending'}">${voted ? 'voted' : 'thinking…'}</div>
+function renderResultsBlock(namedVotes, participants){
+  const groups = groupByValue(namedVotes);
+  const nv = nonVoters(namedVotes, participants);
+  const groupsHtml = groups.map(g => `
+    <div class="vote-group">
+      <div class="vote-group-value">${escapeHtml(g.value)}</div>
+      <div class="vote-group-names">${g.names.map(n=>`<span class="chip voted"><span class="dot"></span>${escapeHtml(n)}</span>`).join('')}</div>
+    </div>
+  `).join('');
+  const nvHtml = nv.length ? `
+    <div class="vote-group novote-group">
+      <div class="vote-group-value">Didn't vote</div>
+      <div class="vote-group-names">${nv.map(n=>`<span class="chip"><span class="dot"></span>${escapeHtml(n)}</span>`).join('')}</div>
+    </div>
+  ` : '';
+  return `<div class="results-panel">${groupsHtml || '<div class="empty-table-note">No votes yet.</div>'}${nvHtml}</div>`;
+}
+
+function viewRoom(){
+  const session = S.session;
+  if(!session) return `<div class="loading-note">Loading session…</div>`;
+  const host = isHost();
+  const participants = session.participants;
+  const cs = session.currentStory;
+
+  const participantListHtml = participants.length ? participants.map(p => `
+    <div class="participant-row">
+      <span class="p-name">${escapeHtml(p.name)}${p.clientId===session.hostClientId?' <span class="host-tag">HOST</span>':''}${p.clientId===S.clientId?' (you)':''}</span>
+      <span class="p-status status-${p.status}">${statusLabel(p.status)}</span>
+    </div>
+  `).join('') : `<div class="empty-table-note">Waiting for people to join…</div>`;
+
+  let storyAreaHtml = '';
+  if(!cs){
+    storyAreaHtml = host ? `
+      <div class="card-panel">
+        <label class="field-label">Start the first story</label>
+        ${storyStartForm(1)}
+      </div>
+    ` : `<div class="card-panel"><div class="waiting-note">Waiting for the host to start a story…</div></div>`;
+  } else if(!cs.revealed){
+    const myVote = cs.votes[S.clientId];
+    const optionButtons = FIBONACCI.map(opt => `
+      <button class="opt-btn ${myVote===opt?'picked':''}" data-action="vote" data-value="${escapeHtml(opt)}">${escapeHtml(opt)}</button>
+    `).join('');
+    storyAreaHtml = `
+      <div class="card-panel">
+        <div class="poll-name">${escapeHtml(cs.storyTitle)} <span class="round-tag">${escapeHtml(cs.storyId)}</span></div>
+        <label class="field-label">Pick your estimate</label>
+        <div class="option-grid">${optionButtons}</div>
+        ${myVote ? `<div class="waiting-note">You picked ${escapeHtml(myVote)}. You can change it until the host reveals.</div>` : `<div class="waiting-note">Tap a card to lock in your estimate.</div>`}
+        ${host ? `<div class="btn-row"><button class="btn-primary" data-action="reveal">Reveal cards</button></div>` : ''}
       </div>
     `;
-  }).join('') : `<div class="empty-table-note">Share the room code below — voters will appear here as they join.</div>`;
-
-  let resultsHtml = '';
-  if(room.revealed){
-    const barsHtml = room.options.map(opt => {
-      const count = stats.counts[opt] || 0;
-      const pct = Math.round((count / stats.maxCount) * 100);
-      return `
-        <div class="bar-row">
-          <div class="bar-label">${escapeHtml(opt)}</div>
-          <div class="bar-track"><div class="bar-fill" style="width:${count?pct:0}%"></div></div>
-          <div class="bar-count">${count || ''}</div>
-        </div>
-      `;
-    }).join('');
-
-    resultsHtml = `
-      <div class="results-panel">
-        <div class="results-stats">
-          ${stats.avg !== null ? `<div class="stat"><div class="stat-val">${stats.avg.toFixed(1)}</div><div class="stat-label">average</div></div>` : ''}
-          <div class="stat"><div class="stat-val">${stats.mode !== null ? escapeHtml(stats.mode) : '—'}</div><div class="stat-label">most picked</div></div>
-          <div class="stat"><div class="stat-val">${stats.totalVotes}/${voterEntries.length}</div><div class="stat-label">voted</div></div>
-        </div>
-        ${barsHtml}
+  } else {
+    const named = namedVotesFromCurrent(session);
+    storyAreaHtml = `
+      <div class="card-panel">
+        <div class="poll-name">${escapeHtml(cs.storyTitle)} <span class="round-tag">${escapeHtml(cs.storyId)}</span></div>
+        ${renderResultsBlock(named, participants)}
+        ${host ? `
+          <div class="btn-row">
+            <button class="btn-secondary" data-action="open-story-form">Start next story</button>
+          </div>
+          ${S.storyFormOpen ? storyStartForm(session.storyHistory.length+2, true) : ''}
+        ` : ''}
       </div>
     `;
   }
 
-  const newRoundForm = S.newRoundDraftOpen ? `
-    <div style="margin-top:14px;">
-      <label class="field-label" for="newPollName">New poll name (leave blank to keep current)</label>
-      <input class="field-full" id="newPollName" placeholder="${escapeHtml(room.pollName)}" />
-      <div class="btn-row">
-        <button class="btn-primary" data-action="confirm-new-round">Start round ${room.round+1}</button>
-        <button class="btn-secondary" data-action="cancel-new-round">Cancel</button>
+  const historyHtml = session.storyHistory.length ? session.storyHistory.map((h, idx) => `
+    <button class="history-item" data-action="view-history" data-idx="${idx}">
+      <span class="hi-title">${escapeHtml(h.storyTitle)}</span>
+      <span class="hi-id">${escapeHtml(h.storyId)}</span>
+    </button>
+  `).join('') : `<div class="empty-table-note">No completed stories yet.</div>`;
+
+  let historyModal = '';
+  if(S.viewingHistoryIndex !== null && session.storyHistory[S.viewingHistoryIndex]){
+    const h = session.storyHistory[S.viewingHistoryIndex];
+    historyModal = `
+      <div class="card-panel" style="margin-top:14px;">
+        <div class="poll-name">${escapeHtml(h.storyTitle)} <span class="round-tag">${escapeHtml(h.storyId)}</span></div>
+        ${renderResultsBlock(h.votes, participants)}
+        <div class="btn-row"><button class="btn-secondary" data-action="close-history">Close</button></div>
       </div>
-    </div>
-  ` : '';
+    `;
+  }
 
   return `
     <div class="room-top">
       <div>
-        <span class="room-code-tag">ROOM ${S.roomCode} <button class="link-inline-btn" data-action="copy-code">copy</button></span>
-        <div class="poll-name">${escapeHtml(room.pollName)}</div>
+        <div class="poll-name">${escapeHtml(session.name)}</div>
+        ${host ? `
+          <div style="margin-top:8px;">
+            <span class="room-code-tag">${escapeHtml(inviteLink())} <button class="link-inline-btn" data-action="copy-link">copy</button></span>
+          </div>
+        ` : ''}
       </div>
-      <div class="round-tag">Round ${room.round} · ${PRESETS[room.pollType] ? PRESETS[room.pollType].name : 'Custom'}</div>
+      <div class="btn-row" style="margin-top:0;">
+        ${host ? `
+          <button class="btn-secondary" data-action="export-pdf">Export PDF</button>
+          <button class="btn-secondary" data-action="export-excel">Export Excel</button>
+          <button class="btn-danger" data-action="end-session">End session</button>
+        ` : `<button class="btn-secondary" data-action="leave-room">Leave</button>`}
+      </div>
     </div>
 
-    <div class="table-oval">${seats}</div>
-
-    <div class="controls-row">
-      <button class="btn-primary" data-action="reveal" ${room.revealed?'disabled':''}>${room.revealed ? 'Revealed' : 'Reveal cards'}</button>
-      <button class="btn-secondary" data-action="open-new-round">New round</button>
-      <button class="btn-danger" data-action="end-session">End session</button>
+    <div class="two-col">
+      <div>
+        ${storyAreaHtml}
+        <div class="card-panel" style="margin-top:16px;">
+          <label class="field-label">Story timeline</label>
+          <div class="history-list">${historyHtml}</div>
+          ${historyModal}
+        </div>
+      </div>
+      <div class="card-panel side-panel">
+        <label class="field-label">At the table (${participants.length})</label>
+        <div class="participant-list">${participantListHtml}</div>
+      </div>
     </div>
-    ${newRoundForm}
-    ${resultsHtml}
-    <footer class="tiny-note">Voters join at this same page with room code <strong>${S.roomCode}</strong>.</footer>
   `;
 }
 
-function viewVoterVote(){
-  const room = S.room;
-  if(!room) return `<div class="loading-note">Loading room…</div>`;
-  const myVote = room.votes ? room.votes[S.myId] : undefined;
-  const voterEntries = Object.entries(room.voters || {});
-  const stats = computeStats(room);
-
-  const optionButtons = room.options.map(opt => `
-    <button class="opt-btn ${myVote===opt?'picked':''}" data-action="vote" data-value="${escapeHtml(opt)}" ${room.revealed?'disabled':''}>${escapeHtml(opt)}</button>
-  `).join('');
-
-  let resultsHtml = '';
-  if(room.revealed){
-    const barsHtml = room.options.map(opt => {
-      const count = stats.counts[opt] || 0;
-      const pct = Math.round((count / stats.maxCount) * 100);
-      return `
-        <div class="bar-row">
-          <div class="bar-label">${escapeHtml(opt)}</div>
-          <div class="bar-track"><div class="bar-fill" style="width:${count?pct:0}%"></div></div>
-          <div class="bar-count">${count || ''}</div>
-        </div>
-      `;
-    }).join('');
-    resultsHtml = `
-      <div class="results-panel">
-        <div class="results-stats">
-          ${stats.avg !== null ? `<div class="stat"><div class="stat-val">${stats.avg.toFixed(1)}</div><div class="stat-label">average</div></div>` : ''}
-          <div class="stat"><div class="stat-val">${stats.mode !== null ? escapeHtml(stats.mode) : '—'}</div><div class="stat-label">most picked</div></div>
-        </div>
-        ${barsHtml}
-      </div>
-    `;
-  }
-
-  const chips = voterEntries.map(([vid,v]) => {
-    const voted = room.votes && room.votes.hasOwnProperty(vid);
-    return `<span class="chip ${voted?'voted':''}"><span class="dot"></span>${escapeHtml(v.name)}${vid===S.myId?' (you)':''}</span>`;
-  }).join('');
-
+function storyStartForm(suggestedNum, isNext){
   return `
-    <div class="room-top">
-      <div>
-        <span class="room-code-tag">ROOM ${S.roomCode}</span>
-        <div class="poll-name">${escapeHtml(room.pollName)}</div>
-      </div>
-      <div class="round-tag">Round ${room.round}</div>
-    </div>
-
-    <div class="card-panel">
-      <label class="field-label">Pick your estimate</label>
-      <div class="option-grid">${optionButtons}</div>
-      ${myVote && !room.revealed ? `<div class="waiting-note">You picked ${escapeHtml(myVote)}. Waiting for the host to reveal…</div>` : ''}
-      ${!myVote && !room.revealed ? `<div class="waiting-note">Tap a card above to lock in your estimate.</div>` : ''}
-      ${resultsHtml}
-      <div class="voter-list-mini">
-        <div class="vlabel">At the table</div>
-        <div class="chip-row">${chips}</div>
-      </div>
+    <div style="margin-top:${isNext?'14px':'0'};">
+      <label class="field-label" for="storyTitle">Story title</label>
+      <input class="field-full" id="storyTitle" placeholder="e.g. Story: OAuth login flow" />
+      <label class="field-label" for="storyIdField">Story ID (optional)</label>
+      <input class="field-full" id="storyIdField" placeholder="e.g. S${suggestedNum}" />
       <div class="btn-row">
-        <button class="btn-secondary" data-action="leave-room">Leave room</button>
+        <button class="btn-primary" data-action="${isNext?'confirm-next-story':'confirm-start-story'}">${isNext?'Start next round':'Start voting'}</button>
+        ${isNext ? `<button class="btn-secondary" data-action="cancel-story-form">Cancel</button>` : ''}
       </div>
     </div>
   `;
@@ -370,10 +370,10 @@ function viewVoterVote(){
 function render(){
   const app = document.getElementById('app');
   switch(S.view){
-    case 'hostSetup': app.innerHTML = viewHostSetup(); break;
-    case 'hostDashboard': app.innerHTML = viewHostDashboard(); break;
-    case 'voterJoin': app.innerHTML = viewVoterJoin(); break;
-    case 'voterVote': app.innerHTML = viewVoterVote(); break;
+    case 'createSession': app.innerHTML = viewCreateSession(); break;
+    case 'joinSession': app.innerHTML = viewJoinSession(); break;
+    case 'joinManual': app.innerHTML = viewJoinManual(); break;
+    case 'room': app.innerHTML = viewRoom(); break;
     default: app.innerHTML = viewLanding(); break;
   }
 }
@@ -385,53 +385,59 @@ document.addEventListener('click', (e) => {
   if(!el) return;
   const action = el.dataset.action;
 
-  if(action === 'go-host'){ S.view='hostSetup'; S.error=''; S._pollType='fibonacci'; render(); }
-  else if(action === 'go-join'){ S.view='voterJoin'; S.error=''; render(); }
-  else if(action === 'go-landing'){ resetToLanding(); }
-  else if(action === 'pick-type'){ S._pollType = el.dataset.type; render(); }
+  if(action === 'go-create'){ S.view='createSession'; S.error=''; render(); }
+  else if(action === 'go-join-manual'){ S.view='joinManual'; S.error=''; render(); }
+  else if(action === 'go-landing'){ S.view='landing'; S.error=''; render(); }
   else if(action === 'submit-create'){
-    const nameEl = document.getElementById('hostName');
-    const pollEl = document.getElementById('pollName');
-    S.myName = nameEl ? nameEl.value : '';
-    const pollName = pollEl ? pollEl.value.trim() : '';
-    if(!pollName){ S.error = "Give the poll a name so voters know what they're sizing."; render(); return; }
-    let options;
-    if(S._pollType === 'custom'){
-      const customEl = document.getElementById('customOpts');
-      options = (customEl ? customEl.value : '').split(',').map(s=>s.trim()).filter(Boolean);
-      if(options.length < 2){ S.error = 'Add at least two custom options, separated by commas.'; render(); return; }
-      S._customOpts = options;
-    } else {
-      options = PRESETS[S._pollType].options;
-    }
-    createRoom(pollName, S._pollType, options);
+    const n = document.getElementById('sessionName').value.trim();
+    const h = document.getElementById('hostName').value.trim();
+    if(!n){ S.error='Give the session a name.'; render(); return; }
+    if(!h){ S.error='Enter your name.'; render(); return; }
+    createSession(n, h);
+  }
+  else if(action === 'submit-goto-join'){
+    const raw = document.getElementById('linkOrCode').value;
+    const id = parseSessionIdFromInput(raw);
+    if(!id){ S.error='Enter a valid invite link or code.'; render(); return; }
+    S.sessionId = id;
+    history.pushState(null, '', `/r/${id}`);
+    S.view = 'joinSession'; S.error='';
+    render();
   }
   else if(action === 'submit-join'){
-    const codeEl = document.getElementById('joinCode');
-    const nameEl = document.getElementById('joinName');
-    const code = codeEl ? codeEl.value : '';
-    const name = nameEl ? nameEl.value : '';
-    if(!code.trim()){ S.error = 'Enter the room code your host shared.'; render(); return; }
-    if(!name.trim()){ S.error = "Tell us your name so the host can see who's voting."; render(); return; }
-    tryJoinRoom(code, name);
+    const n = document.getElementById('joinName').value.trim();
+    if(!n){ S.error='Enter your name.'; render(); return; }
+    joinSession(n);
   }
   else if(action === 'vote'){ submitVote(el.dataset.value); }
   else if(action === 'reveal'){ revealVotes(); }
-  else if(action === 'open-new-round'){ S.newRoundDraftOpen = true; render(); }
-  else if(action === 'cancel-new-round'){ S.newRoundDraftOpen = false; render(); }
-  else if(action === 'confirm-new-round'){
-    const el2 = document.getElementById('newPollName');
-    startNewRound(el2 ? el2.value : '');
+  else if(action === 'confirm-start-story'){
+    const title = document.getElementById('storyTitle').value;
+    const id = document.getElementById('storyIdField').value;
+    startStory(id, title);
   }
-  else if(action === 'kick'){ kickVoter(el.dataset.vid); }
+  else if(action === 'open-story-form'){ S.storyFormOpen = true; render(); }
+  else if(action === 'cancel-story-form'){ S.storyFormOpen = false; render(); }
+  else if(action === 'confirm-next-story'){
+    const title = document.getElementById('storyTitle').value;
+    const id = document.getElementById('storyIdField').value;
+    nextStory(id, title);
+  }
+  else if(action === 'view-history'){ S.viewingHistoryIndex = parseInt(el.dataset.idx,10); render(); }
+  else if(action === 'close-history'){ S.viewingHistoryIndex = null; render(); }
   else if(action === 'end-session'){ endSession(); }
-  else if(action === 'leave-room'){ leaveRoom(); }
-  else if(action === 'copy-code'){
-    navigator.clipboard.writeText(S.roomCode).then(() => {
+  else if(action === 'leave-room'){ leaveSession(); }
+  else if(action === 'export-pdf'){ exportFile('pdf'); }
+  else if(action === 'export-excel'){ exportFile('excel'); }
+  else if(action === 'copy-link'){
+    navigator.clipboard.writeText(inviteLink()).then(()=>{
       el.textContent = 'copied!';
       setTimeout(()=>{ el.textContent = 'copy'; }, 1500);
     }).catch(()=>{});
   }
 });
 
+/* ============================= INIT ============================= */
+
+if(S.sessionId){ S.view = 'joinSession'; } // will be upgraded to 'room' on rejoin if identity is recognized
 render();
