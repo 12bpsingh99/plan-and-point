@@ -1,5 +1,6 @@
 /* ============================= STATE ============================= */
 const FIBONACCI = ['0','½','1','2','3','5','8','13','21','34','55','89','?','☕'];
+const PALETTE = ['#C9973F','#7A9B7E','#6E8FC6','#B5654A','#9B7AC6','#5FA8A0','#C68F6E','#4C8BF5'];
 
 function getOrCreateClientId(){
   let id = localStorage.getItem('pp_client_id');
@@ -31,9 +32,7 @@ const S = {
 
 const socket = io();
 
-socket.on('connect', () => {
-  if(S.sessionId){ attemptRejoin(); }
-});
+socket.on('connect', () => { if(S.sessionId){ attemptRejoin(); } });
 
 socket.on('session-update', (session) => {
   S.session = session;
@@ -43,12 +42,17 @@ socket.on('session-update', (session) => {
 
 socket.on('session-closed', () => {
   S.error = 'This session was ended by the host.';
-  S.session = null;
-  S.sessionId = null;
-  S.view = 'landing';
+  S.session = null; S.sessionId = null; S.view = 'landing';
   history.replaceState(null, '', '/');
   render();
 });
+
+// Tick every second while a story is live and unrevealed, to keep the timer moving.
+setInterval(() => {
+  if(S.view === 'room' && S.session && S.session.currentStory && !S.session.currentStory.revealed){
+    render();
+  }
+}, 1000);
 
 /* ============================= HELPERS ============================= */
 
@@ -57,6 +61,21 @@ function escapeHtml(s){
 }
 function inviteLink(){ return `${window.location.origin}/r/${S.sessionId}`; }
 function isHost(){ return !!(S.session && S.session.hostClientId === S.clientId); }
+
+function initials(name){
+  return (name||'?').trim().split(/\s+/).slice(0,2).map(w=>w[0]?w[0].toUpperCase():'').join('') || '?';
+}
+function avatarColor(name){
+  let hash = 0;
+  for(let i=0;i<(name||'').length;i++) hash = (hash*31 + name.charCodeAt(i)) | 0;
+  return PALETTE[Math.abs(hash) % PALETTE.length];
+}
+function formatElapsed(ms){
+  const total = Math.max(0, Math.floor(ms/1000));
+  const h = Math.floor(total/3600), m = Math.floor((total%3600)/60), s = total%60;
+  const pad = n => String(n).padStart(2,'0');
+  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
 
 function namedVotesFromCurrent(session){
   const out = {};
@@ -88,46 +107,39 @@ function attemptRejoin(){
     else { S.view = 'joinSession'; render(); }
   });
 }
-
 function createSession(sessionName, hostName){
   S.loading = true; S.error=''; render();
   socket.emit('create-session', { sessionName, hostName, clientId: S.clientId }, (res) => {
     S.loading = false;
     if(!res.ok){ S.error = res.error; render(); return; }
-    S.sessionId = res.sessionId;
-    S.myName = hostName;
+    S.sessionId = res.sessionId; S.myName = hostName;
     history.pushState(null, '', `/r/${res.sessionId}`);
-    S.view = 'room';
-    render();
+    S.view = 'room'; render();
   });
 }
-
 function joinSession(name){
   S.loading = true; S.error=''; render();
   socket.emit('join-session', { sessionId: S.sessionId, name, clientId: S.clientId }, (res) => {
     S.loading = false;
     if(!res.ok){ S.error = res.error; render(); return; }
-    S.myName = name;
-    S.view = 'room';
-    render();
+    S.myName = name; S.view = 'room'; render();
   });
 }
-
 function submitVote(value){ socket.emit('submit-vote', { value }); }
 function revealVotes(){ socket.emit('reveal-votes'); }
+function resetTimer(){ socket.emit('reset-timer'); }
+function clearVotes(){ socket.emit('clear-votes'); }
+function skipStory(){ socket.emit('skip-story'); }
 function startStory(storyId){ S.storyFormOpen = false; socket.emit('start-story', { storyId }); }
 function nextStory(storyId){ S.storyFormOpen = false; socket.emit('next-story', { storyId }); }
 function endSession(){ socket.emit('end-session'); }
-
 function leaveSession(){
   S.session = null; S.sessionId = null; S.view = 'landing'; S.error='';
   history.replaceState(null, '', '/');
   render();
 }
-
 function exportFile(kind){
-  const url = `/api/session/${S.sessionId}/export/${kind}?clientId=${encodeURIComponent(S.clientId)}`;
-  window.open(url, '_blank');
+  window.open(`/api/session/${S.sessionId}/export/${kind}?clientId=${encodeURIComponent(S.clientId)}`, '_blank');
 }
 
 /* ============================= VIEWS ============================= */
@@ -168,13 +180,10 @@ function viewCreateSession(){
     <div class="card-panel">
       <label class="field-label" for="sessionName">Session name</label>
       <input class="field-full" id="sessionName" placeholder="e.g. Sprint 42 Planning" />
-
       <label class="field-label" for="hostName">Your name</label>
       <input class="field-full" id="hostName" placeholder="e.g. Priya" />
       <div class="hint-text">As host, you'll moderate the session and won't cast votes yourself.</div>
-
       ${S.error ? `<div class="error-text">${escapeHtml(S.error)}</div>` : ''}
-
       <div class="btn-row">
         <button class="btn-primary" data-action="submit-create" ${S.loading?'disabled':''}>${S.loading ? 'Creating…' : 'Create session'}</button>
         <button class="btn-secondary" data-action="go-landing">Back</button>
@@ -219,28 +228,87 @@ function viewJoinSession(){
   `;
 }
 
-function statusLabel(status){
-  if(status==='voted') return 'Voted';
-  if(status==='disconnected') return 'Disconnected';
-  return 'Waiting';
+function waitingBanner(cs, participants){
+  if(!cs) return '';
+  if(cs.revealed) return `<div class="status-banner done">Cards revealed</div>`;
+  const votedCount = Object.keys(cs.votes).length;
+  const remaining = participants.length - votedCount;
+  if(participants.length > 0 && remaining <= 0) return `<div class="status-banner ready">All players voted</div>`;
+  return `<div class="status-banner waiting">Waiting on ${remaining} player${remaining===1?'':'s'} to vote</div>`;
+}
+
+function renderDonutResults(groups, totalVotes){
+  let cum = 0;
+  const stops = groups.map((g,i) => {
+    const pct = totalVotes ? (g.names.length/totalVotes*100) : 0;
+    const start = cum; cum += pct;
+    return `${PALETTE[i%PALETTE.length]} ${start}% ${cum}%`;
+  }).join(', ');
+  const legend = groups.map((g,i) => {
+    const pct = totalVotes ? Math.round(g.names.length/totalVotes*100) : 0;
+    return `
+      <div class="legend-row">
+        <span class="legend-dot" style="background:${PALETTE[i%PALETTE.length]}"></span>
+        <span class="legend-value">${escapeHtml(g.value)}</span>
+        <span class="legend-pct">${pct}%</span>
+        <span class="legend-names">${g.names.map(escapeHtml).join(', ')}</span>
+      </div>
+    `;
+  }).join('');
+  return `
+    <div class="donut-wrap">
+      <div class="donut" style="background:conic-gradient(${stops || 'var(--ink-3) 0% 100%'})">
+        <div class="donut-hole"><div class="donut-num">${totalVotes}</div><div class="donut-label">voted</div></div>
+      </div>
+      <div class="donut-legend">${legend || '<div class="empty-table-note">No votes yet.</div>'}</div>
+    </div>
+  `;
 }
 
 function renderResultsBlock(namedVotes, participants){
   const groups = groupByValue(namedVotes);
   const nv = nonVoters(namedVotes, participants);
-  const groupsHtml = groups.map(g => `
-    <div class="vote-group">
-      <div class="vote-group-value">${escapeHtml(g.value)}</div>
-      <div class="vote-group-names">${g.names.map(n=>`<span class="chip voted"><span class="dot"></span>${escapeHtml(n)}</span>`).join('')}</div>
-    </div>
-  `).join('');
+  const totalVotes = Object.keys(namedVotes).length;
   const nvHtml = nv.length ? `
     <div class="vote-group novote-group">
       <div class="vote-group-value">Didn't vote</div>
       <div class="vote-group-names">${nv.map(n=>`<span class="chip"><span class="dot"></span>${escapeHtml(n)}</span>`).join('')}</div>
     </div>
   ` : '';
-  return `<div class="results-panel">${groupsHtml || '<div class="empty-table-note">No votes yet.</div>'}${nvHtml}</div>`;
+  return `<div class="results-panel">${renderDonutResults(groups, totalVotes)}${nvHtml}</div>`;
+}
+
+function pokerCard(opt, picked){
+  return `
+    <button class="opt-btn poker-card ${picked?'picked':''}" data-action="vote" data-value="${escapeHtml(opt)}">
+      <span class="corner corner-tl">${escapeHtml(opt)}</span>
+      <span class="card-main">${escapeHtml(opt)}</span>
+      <span class="corner corner-br">${escapeHtml(opt)}</span>
+    </button>
+  `;
+}
+
+function playerRow(p, cs, isHostRow){
+  const voted = cs && cs.votes.hasOwnProperty(p.clientId);
+  let metaHtml;
+  if(!cs){
+    metaHtml = `<span class="player-dot ${p.status==='disconnected'?'off':''}"></span>`;
+  } else if(cs.revealed){
+    metaHtml = voted ? `<span class="player-vote">${escapeHtml(cs.votes[p.clientId])}</span>` : `<span class="player-novote">—</span>`;
+  } else if(voted){
+    metaHtml = `<span class="player-check">✓</span>`;
+  } else if(p.status === 'disconnected'){
+    metaHtml = `<span class="player-status-tag off">disconnected</span>`;
+  } else {
+    metaHtml = `<span class="player-status-tag">thinking…</span>`;
+  }
+  return `
+    <div class="player-row">
+      <span class="avatar" style="background:${avatarColor(p.name)}">${initials(p.name)}</span>
+      <span class="player-name">${escapeHtml(p.name)}${p.clientId===S.clientId?' (you)':''}</span>
+      <span class="player-meta">${metaHtml}</span>
+    </div>
+  `;
 }
 
 function viewRoom(){
@@ -250,16 +318,10 @@ function viewRoom(){
   const participants = session.participants;
   const cs = session.currentStory;
 
-  const participantListHtml = participants.length ? participants.map(p => `
-    <div class="participant-row">
-      <span class="p-name">${escapeHtml(p.name)}${p.clientId===S.clientId?' (you)':''}</span>
-      <span class="p-status status-${p.status}">${statusLabel(p.status)}</span>
-    </div>
-  `).join('') : `<div class="empty-table-note">Waiting for people to join…</div>`;
-
-  let storyAreaHtml = '';
+  /* ---- main column: voting / results / timeline ---- */
+  let mainHtml = '';
   if(!cs){
-    storyAreaHtml = host ? `
+    mainHtml = host ? `
       <div class="card-panel">
         <label class="field-label">Start the first story</label>
         ${storyStartForm(1)}
@@ -268,37 +330,32 @@ function viewRoom(){
   } else if(!cs.revealed){
     if(host){
       const votedCount = Object.keys(cs.votes).length;
-      storyAreaHtml = `
+      mainHtml = `
         <div class="card-panel">
           <div class="poll-name">Story <span class="round-tag">${escapeHtml(cs.storyId)}</span></div>
-          <div class="waiting-note">${votedCount} of ${participants.length} voted.</div>
+          <div class="timer-line">⏱ ${formatElapsed(Date.now() - cs.startedAt)} elapsed · ${votedCount} of ${participants.length} voted</div>
           <div class="btn-row"><button class="btn-primary" data-action="reveal">Reveal cards</button></div>
         </div>
       `;
     } else {
       const myVote = cs.votes[S.clientId];
-      const optionButtons = FIBONACCI.map(opt => `
-        <button class="opt-btn ${myVote===opt?'picked':''}" data-action="vote" data-value="${escapeHtml(opt)}">${escapeHtml(opt)}</button>
-      `).join('');
-      storyAreaHtml = `
+      mainHtml = `
         <div class="card-panel">
           <div class="poll-name">Story <span class="round-tag">${escapeHtml(cs.storyId)}</span></div>
           <label class="field-label">Pick your estimate</label>
-          <div class="option-grid">${optionButtons}</div>
+          <div class="option-grid poker-grid">${FIBONACCI.map(o=>pokerCard(o, myVote===o)).join('')}</div>
           ${myVote ? `<div class="waiting-note">You picked ${escapeHtml(myVote)}. You can change it until the host reveals.</div>` : `<div class="waiting-note">Tap a card to lock in your estimate.</div>`}
         </div>
       `;
     }
   } else {
     const named = namedVotesFromCurrent(session);
-    storyAreaHtml = `
+    mainHtml = `
       <div class="card-panel">
         <div class="poll-name">Story <span class="round-tag">${escapeHtml(cs.storyId)}</span></div>
         ${renderResultsBlock(named, participants)}
         ${host ? `
-          <div class="btn-row">
-            <button class="btn-secondary" data-action="open-story-form">Start next story</button>
-          </div>
+          <div class="btn-row"><button class="btn-secondary" data-action="open-story-form">Start next story</button></div>
           ${S.storyFormOpen ? storyStartForm(session.storyHistory.length+2, true) : ''}
         ` : ''}
       </div>
@@ -306,9 +363,7 @@ function viewRoom(){
   }
 
   const historyHtml = session.storyHistory.length ? session.storyHistory.map((h, idx) => `
-    <button class="history-item" data-action="view-history" data-idx="${idx}">
-      <span class="hi-id">Story ${escapeHtml(h.storyId)}</span>
-    </button>
+    <button class="history-item" data-action="view-history" data-idx="${idx}"><span class="hi-id">Story ${escapeHtml(h.storyId)}</span></button>
   `).join('') : `<div class="empty-table-note">No completed stories yet.</div>`;
 
   let historyModal = '';
@@ -323,16 +378,34 @@ function viewRoom(){
     `;
   }
 
+  /* ---- sidebar: banner, players, host controls, invite ---- */
+  const playersHtml = participants.length
+    ? participants.map(p => playerRow(p, cs, host)).join('')
+    : `<div class="empty-table-note">Waiting for people to join…</div>`;
+
+  const hostActionsHtml = host ? `
+    <div class="side-actions">
+      <button class="btn-secondary sm" data-action="reset-timer" ${!cs||cs.revealed?'disabled':''}>Reset timer</button>
+      <button class="btn-secondary sm" data-action="clear-votes" ${!cs?'disabled':''}>Clear votes</button>
+      <button class="btn-secondary sm" data-action="skip-story" ${!cs?'disabled':''}>Skip story</button>
+    </div>
+  ` : '';
+
+  const inviteHtml = host ? `
+    <div class="invite-box">
+      <label class="field-label">Invite a team mate</label>
+      <div class="invite-row">
+        <input class="field-full" readonly value="${escapeHtml(inviteLink())}" onclick="this.select()" />
+        <button class="btn-secondary sm" data-action="copy-link">Copy</button>
+      </div>
+    </div>
+  ` : '';
+
   return `
     <div class="room-top">
       <div>
         <div class="poll-name">${escapeHtml(session.name)}</div>
         <div class="hint-text" style="margin-top:4px;">Hosted by ${escapeHtml(session.hostName)}${!session.hostConnected ? ' <span style="color:#C97D64;">(reconnecting…)</span>' : ''}</div>
-        ${host ? `
-          <div style="margin-top:8px;">
-            <span class="room-code-tag">${escapeHtml(inviteLink())} <button class="link-inline-btn" data-action="copy-link">copy</button></span>
-          </div>
-        ` : ''}
       </div>
       <div class="btn-row" style="margin-top:0;">
         ${host ? `
@@ -345,7 +418,7 @@ function viewRoom(){
 
     <div class="two-col">
       <div>
-        ${storyAreaHtml}
+        ${mainHtml}
         <div class="card-panel" style="margin-top:16px;">
           <label class="field-label">Story timeline</label>
           <div class="history-list">${historyHtml}</div>
@@ -353,8 +426,11 @@ function viewRoom(){
         </div>
       </div>
       <div class="card-panel side-panel">
-        <label class="field-label">At the table (${participants.length})</label>
-        <div class="participant-list">${participantListHtml}</div>
+        ${waitingBanner(cs, participants)}
+        <label class="field-label" style="margin-top:${cs?'16px':'0'};">At the table (${participants.length})</label>
+        <div class="participant-list">${playersHtml}</div>
+        ${hostActionsHtml}
+        ${inviteHtml}
       </div>
     </div>
   `;
@@ -419,6 +495,9 @@ document.addEventListener('click', (e) => {
   }
   else if(action === 'vote'){ submitVote(el.dataset.value); }
   else if(action === 'reveal'){ revealVotes(); }
+  else if(action === 'reset-timer'){ resetTimer(); }
+  else if(action === 'clear-votes'){ clearVotes(); }
+  else if(action === 'skip-story'){ skipStory(); }
   else if(action === 'confirm-start-story'){
     const id = document.getElementById('storyIdField').value.trim();
     if(!id){ S.error='Enter a Story ID.'; render(); return; }
@@ -439,13 +518,13 @@ document.addEventListener('click', (e) => {
   else if(action === 'export-excel'){ exportFile('excel'); }
   else if(action === 'copy-link'){
     navigator.clipboard.writeText(inviteLink()).then(()=>{
-      el.textContent = 'copied!';
-      setTimeout(()=>{ el.textContent = 'copy'; }, 1500);
+      el.textContent = 'Copied!';
+      setTimeout(()=>{ el.textContent = 'Copy'; }, 1500);
     }).catch(()=>{});
   }
 });
 
 /* ============================= INIT ============================= */
 
-if(S.sessionId){ S.view = 'joinSession'; } // upgraded to 'room' on rejoin if identity is recognized
+if(S.sessionId){ S.view = 'joinSession'; }
 render();

@@ -214,3 +214,133 @@ footer.tiny-note{ margin-top:30px; color:var(--text-muted); font-size:12px; font
   .option-grid{ gap:8px; }
   .opt-btn{ padding:12px 14px; font-size:14px; min-width:44px; }
 }
+
+/* ===== v1.5: PlanITPoker-inspired layout ===== */
+
+/* Status banner */
+.status-banner{
+  font-family:var(--font-mono);
+  font-size:12.5px;
+  padding:10px 14px;
+  border-radius:8px;
+  margin-bottom:6px;
+  text-align:center;
+}
+.status-banner.waiting{ background:#2A3E6C; color:var(--paper-2); }
+.status-banner.ready{ background:rgba(122,155,126,0.25); color:var(--sage); }
+.status-banner.done{ background:rgba(201,151,63,0.2); color:var(--gold-bright); }
+
+/* Player rows with avatars */
+.player-row{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:8px 4px;
+  border-bottom:1px solid var(--line);
+  font-size:13.5px;
+}
+.player-row:last-child{ border-bottom:none; }
+.avatar{
+  width:28px; height:28px;
+  border-radius:50%;
+  display:flex; align-items:center; justify-content:center;
+  font-family:var(--font-mono);
+  font-size:11px;
+  font-weight:600;
+  color:#1B1300;
+  flex-shrink:0;
+}
+.player-name{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.player-meta{ flex-shrink:0; font-family:var(--font-mono); font-size:12px; }
+.player-check{ color:var(--sage); font-weight:700; }
+.player-vote{ color:var(--gold-bright); font-weight:600; font-size:14px; }
+.player-novote{ color:var(--text-muted); }
+.player-status-tag{ color:var(--text-muted); font-size:10.5px; text-transform:uppercase; letter-spacing:0.04em; }
+.player-status-tag.off{ color:#C97D64; }
+.player-dot{ width:7px; height:7px; border-radius:50%; background:var(--sage); display:inline-block; }
+.player-dot.off{ background:#C97D64; }
+
+/* Sidebar host action row */
+.side-actions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:18px;
+  padding-top:16px;
+  border-top:1px solid var(--line);
+}
+.btn-secondary.sm{ font-size:12.5px; padding:8px 12px; }
+
+.invite-box{ margin-top:18px; padding-top:16px; border-top:1px solid var(--line); }
+.invite-row{ display:flex; gap:8px; align-items:center; }
+.invite-row input{ font-family:var(--font-mono); font-size:11.5px; }
+
+/* Timer line above reveal button (host view) */
+.timer-line{
+  font-family:var(--font-mono);
+  font-size:13px;
+  color:var(--text-muted);
+  margin:10px 0 18px;
+}
+
+/* Banknote-style poker cards */
+.poker-grid{ gap:12px; }
+.poker-card{
+  position:relative;
+  width:64px;
+  height:90px;
+  padding:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.poker-card .corner{
+  position:absolute;
+  font-family:var(--font-mono);
+  font-size:10px;
+  font-weight:600;
+  opacity:0.55;
+}
+.poker-card .corner-tl{ top:6px; left:7px; }
+.poker-card .corner-br{ bottom:6px; right:7px; transform:rotate(180deg); }
+.poker-card .card-main{ font-size:20px; }
+
+/* Donut results */
+.donut-wrap{
+  display:flex;
+  align-items:center;
+  gap:22px;
+  flex-wrap:wrap;
+  margin-bottom:16px;
+}
+.donut{
+  width:118px;
+  height:118px;
+  border-radius:50%;
+  position:relative;
+  flex-shrink:0;
+}
+.donut-hole{
+  position:absolute;
+  inset:16px;
+  background:var(--ink-3);
+  border-radius:50%;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+}
+.donut-num{ font-family:var(--font-mono); font-size:22px; font-weight:600; color:var(--gold-bright); }
+.donut-label{ font-size:10px; text-transform:uppercase; letter-spacing:0.05em; color:var(--text-muted); }
+.donut-legend{ flex:1; min-width:180px; display:flex; flex-direction:column; gap:7px; }
+.legend-row{ display:flex; align-items:baseline; gap:8px; font-size:12.5px; flex-wrap:wrap; }
+.legend-dot{ width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+.legend-value{ font-family:var(--font-mono); font-weight:600; color:var(--paper-2); }
+.legend-pct{ color:var(--text-muted); font-family:var(--font-mono); font-size:11.5px; }
+.legend-names{ color:var(--text-muted); font-size:11.5px; }
+
+@media (max-width:560px){
+  .donut-wrap{ flex-direction:column; align-items:flex-start; }
+  .poker-card{ width:52px; height:74px; }
+  .poker-card .card-main{ font-size:16px; }
+}
