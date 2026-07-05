@@ -167,7 +167,7 @@ function viewLanding(){
       </div>
       ${S.error ? `<div class="error-text">${escapeHtml(S.error)}</div>` : ''}
     </div>
-    <footer class="tiny-note">Sessions live on the server while at least one person's connected. Disconnected participants have a 5-minute grace period before they're removed.</footer>
+    <footer class="tiny-note">Sessions stay open as long as the host keeps it running. If your connection drops, just come back — you can rejoin anytime while the session is still active.</footer>
   `;
 }
 
