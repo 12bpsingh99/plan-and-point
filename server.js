@@ -17,7 +17,7 @@ app.get('/r/:sessionId', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-const FIBONACCI = ['0', '½', '1', '2', '3', '5', '8', '13', '21', '34', '55', '89', '?', '☕'];
+const FIBONACCI = ['0', '1/2', '1', '2', '3', '5', '8', '13', '20', '40', '100', '?', '☕'];
 const DISCONNECT_GRACE_MS = 5 * 60 * 1000; // 5 minutes
 
 /* ---------------------------------------------------------
@@ -233,6 +233,34 @@ io.on('connection', (socket) => {
     broadcast(session);
   });
 
+  socket.on('reset-timer', () => {
+    const { sessionId, clientId } = socket.data;
+    const session = sessions.get(sessionId);
+    if (!session || session.hostClientId !== clientId || !session.currentStory) return;
+    session.currentStory.startedAt = Date.now();
+    broadcast(session);
+  });
+
+  socket.on('clear-votes', () => {
+    const { sessionId, clientId } = socket.data;
+    const session = sessions.get(sessionId);
+    if (!session || session.hostClientId !== clientId || !session.currentStory) return;
+    session.currentStory.votes = {};
+    session.currentStory.revealed = false;
+    session.currentStory.startedAt = Date.now();
+    for (const p of session.participants.values()) p.status = 'waiting';
+    broadcast(session);
+  });
+
+  socket.on('skip-story', () => {
+    const { sessionId, clientId } = socket.data;
+    const session = sessions.get(sessionId);
+    if (!session || session.hostClientId !== clientId) return;
+    session.currentStory = null; // discarded, not added to history
+    for (const p of session.participants.values()) p.status = 'waiting';
+    broadcast(session);
+  });
+
   socket.on('next-story', ({ storyId }) => {
     const { sessionId, clientId } = socket.data;
     const session = sessions.get(sessionId);
@@ -251,6 +279,33 @@ io.on('connection', (socket) => {
       votes: {},
       startedAt: Date.now(),
     };
+    for (const p of session.participants.values()) p.status = 'waiting';
+    broadcast(session);
+  });
+
+  socket.on('reset-timer', () => {
+    const { sessionId, clientId } = socket.data;
+    const session = sessions.get(sessionId);
+    if (!session || session.hostClientId !== clientId || !session.currentStory) return;
+    session.currentStory.startedAt = Date.now();
+    broadcast(session);
+  });
+
+  socket.on('clear-votes', () => {
+    const { sessionId, clientId } = socket.data;
+    const session = sessions.get(sessionId);
+    if (!session || session.hostClientId !== clientId || !session.currentStory) return;
+    session.currentStory.votes = {};
+    session.currentStory.revealed = false;
+    for (const p of session.participants.values()) p.status = 'waiting';
+    broadcast(session);
+  });
+
+  socket.on('skip-story', () => {
+    const { sessionId, clientId } = socket.data;
+    const session = sessions.get(sessionId);
+    if (!session || session.hostClientId !== clientId) return;
+    session.currentStory = null;
     for (const p of session.participants.values()) p.status = 'waiting';
     broadcast(session);
   });
